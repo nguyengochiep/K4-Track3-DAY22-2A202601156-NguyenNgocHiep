@@ -41,7 +41,7 @@ else:  # BIGGPU
     PER_DEVICE_BATCH = 2
     GRAD_ACCUM = 4
 
-SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-cleaned")
+SFT_DATASET = os.environ.get("SFT_DATASET", "saillab/alpaca-vietnamese-cleaned")
 SFT_SLICE = 1000
 NUM_EPOCHS = 1
 
@@ -106,8 +106,11 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %% [markdown]
 # ## 2. Load + format VN Alpaca slice
 #
-# `5CD-AI/Vietnamese-alpaca-cleaned` is a 50k-row VN Alpaca translation. Lab 21
+# `saillab/alpaca-vietnamese-cleaned` is a 41.6k-row VN Alpaca translation. Lab 21
 # uses 1k slice for the demo run; we match that exactly so reward gap is comparable.
+#
+# > Was `5CD-AI/Vietnamese-alpaca-cleaned` -- that repo now returns HTTP 401 (pulled
+# > or gated). Any Alpaca-schema VN set works here; override with `SFT_DATASET`.
 
 # %%
 from datasets import load_dataset
@@ -118,20 +121,36 @@ print(f"\nFirst row:\n{ds[0]}")
 
 # %%
 # Alpaca → ChatML format (Qwen2.5's native template)
+# This dataset writes an absent `input` as the literal string "nan", not None
+# or "", so a plain truthiness test appends "\n\nnan" to ~70% of the prompts.
+EMPTY = {"", "nan", "none", "null", "n/a"}
+
+
 def format_alpaca_to_chat(row):
-    messages = []
-    if row.get("instruction"):
-        prompt = row["instruction"]
-        if row.get("input"):
-            prompt += "\n\n" + row["input"]
-        messages.append({"role": "user", "content": prompt})
-    if row.get("output"):
-        messages.append({"role": "assistant", "content": row["output"]})
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    return {"text": text}
+    instruction = str(row.get("instruction") or "").strip()
+    extra = str(row.get("input") or "").strip()
+    output = str(row.get("output") or "").strip()
+
+    prompt = instruction
+    if extra.lower() not in EMPTY:
+        prompt += "\n\n" + extra
+
+    messages = [{"role": "user", "content": prompt},
+                {"role": "assistant", "content": output}]
+    return {"text": tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False)}
 
 
-ds_formatted = ds.map(format_alpaca_to_chat, remove_columns=ds.column_names)
+n_with_input = sum(
+    1 for r in ds if str(r.get("input") or "").strip().lower() not in EMPTY
+)
+ds_formatted = (
+    ds.filter(lambda r: str(r.get("instruction") or "").strip()
+                        and str(r.get("output") or "").strip())
+      .map(format_alpaca_to_chat, remove_columns=ds.column_names)
+)
+print(f"{n_with_input}/{len(ds)} rows have a real `input` field")
+print(f"Kept {len(ds_formatted)}/{len(ds)} rows after dropping empty instruction/output")
 print(f"\nSample formatted text (first 500 chars):\n{ds_formatted[0]['text'][:500]}")
 
 # %% [markdown]
