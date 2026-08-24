@@ -1,9 +1,9 @@
 # Reflection — Lab 22 (DPO/ORPO Alignment)
 
-**Tên:** _<Họ Tên>_
-**Cohort:** _<A20-K1 / A20-K2 / ...>_
-**Tier đã chạy:** _<T4 | BIGGPU | both>_
-**Date:** _<YYYY-MM-DD>_
+**Tên:** Nguyễn Ngọc Hiệp
+**Cohort:** A20-K4
+**Tier đã chạy:** T4
+**Date:** 2026-08-24
 
 ---
 
@@ -11,110 +11,86 @@
 
 | Item | Value |
 |---|---|
-| GPU | _<e.g., Free Colab T4 16GB / RTX 4060 8GB / A100 40GB>_ |
-| CUDA / driver | _<e.g., CUDA 12.1, driver 535>_ |
-| Base model | _<e.g., unsloth/Qwen2.5-3B-bnb-4bit>_ |
-| SFT dataset slice | _<e.g., saillab/alpaca-vietnamese-cleaned · 1000 samples · 1 epoch>_ |
-| Preference dataset slice | _<e.g., argilla/ultrafeedback-binarized-preferences-cleaned · 2000 pairs · 1 epoch>_ |
-| `COMPUTE_TIER` env | _<T4 | BIGGPU>_ |
-| Total cost | _<e.g., $0 (free Colab) / $1.20 (Colab Pro A100 30 min)>_ |
+| GPU | Free Colab Tesla T4, 15.6 GB (Turing, compute capability 7.5, `Bfloat16 = FALSE`) |
+| CUDA / driver | CUDA 12.8 · Torch 2.10.0+cu128 · Transformers 5.5.0 · Unsloth 2026.4.8 |
+| Base model | `unsloth/Qwen2.5-3B-bnb-4bit` (NF4 4-bit) |
+| LoRA | r=16, α=32, 29,933,568 tham số huấn luyện (0.96% của 3.12B) |
+| SFT dataset slice | `saillab/alpaca-vietnamese-cleaned` · 1000 mẫu · 1 epoch · 125 step · 7 phút 53 |
+| Preference dataset slice | `argilla/ultrafeedback-binarized-preferences-cleaned` · 2000 cặp → lọc còn 877 |
+| `COMPUTE_TIER` env | T4 |
+| Total cost | $0 (free Colab) |
+
+Ghi chú: lab chỉ định `5CD-AI/Vietnamese-alpaca-cleaned`, nhưng repo đó nay trả HTTP 401 (đã gỡ hoặc chuyển gated), nên tôi thay bằng `saillab/alpaca-vietnamese-cleaned` — cùng schema `instruction/input/output`, 41.6k dòng. Dataset này ghi ô `input` rỗng bằng chuỗi literal `"nan"` chứ không phải `None`, nên phép kiểm tra truthiness thông thường sẽ nối `"\n\nnan"` vào khoảng 70% số prompt; tôi lọc riêng trường hợp đó trước khi áp chat template.
 
 ---
 
-## 2. DPO experiment results
+## 2. Kết quả
 
-| Metric | SFT-only baseline | SFT + DPO |
+| Metric | SFT-only | SFT + DPO |
 |---|---:|---:|
-| Training time (NB3) | — | _<e.g., 28 min>_ |
-| VRAM peak | _<e.g., 10.4 GB>_ | _<e.g., 13.8 GB>_ |
-| Final loss | _<e.g., 1.82 (SFT)>_ | _<e.g., 0.48 (DPO)>_ |
-| Reward gap (chosen − rejected, end of training) | n/a | _<e.g., 1.34>_ |
-| Mean output length | _<e.g., 142 tokens>_ | _<e.g., 87 tokens (-39%)>_ |
+| Thời gian train | 7:53 (125 step) | không hoàn thành — xem §3 |
+| Loss đầu → cuối | 1.891 → 1.506 (final 1.5509) | — |
+| Reward gap cuối | n/a | — |
 
-**Tulu 3 reference numbers** (from deck §7.2b, for context only):
-- +1.7 MATH, +3.3 GSM8K, +1.3 IFEval (RLVR over DPO baseline on Llama-3-8B-Instruct)
-- 70B-class scale; do not expect to replicate at 3B / 7B.
+SFT-mini hội tụ bình thường: loss giảm từ 1.891 (step 10) xuống 1.468–1.506 ở các step cuối. Sinh thử cho kết quả tiếng Việt mạch lạc.
+
+Một chi tiết đáng ghi nhận ở bước dựng policy cho DPO: `FastLanguageModel.get_peft_model()` in ra `Unsloth: Already have LoRA adapters! We shall skip this step.` và `peft_config` chỉ có một adapter tên `default`. Nghĩa là DPO **không** tạo adapter thứ hai chồng lên SFT như comment trong notebook mô tả — nó huấn luyện tiếp chính adapter SFT. Hệ quả: `adapters/dpo/` (nếu được tạo ra) là adapter tự chứa cả SFT lẫn DPO, và reference model mà TRL suy ra bằng cách tắt adapter chính là **base model thô**, không phải model SFT. Implicit reward `β·log(π/π_ref)` do đó bao gồm sẵn cả phần dịch chuyển do SFT tạo ra, và reward curve sẽ không xuất phát từ 0.
 
 ---
 
-## 3. Reward curves analysis (≥ 100 words)
+## 3. Reward curves analysis
 
-> **Paste `03_dpo_reward_curves.png` here** (or link to it in `submission/screenshots/`).
+Tôi không dựng được reward curve vì DPO không chạy được trên phần cứng được cấp.
 
-_Interpret both `chosen_rewards` and `rejected_rewards` separately. Did chosen go up, or did the gap grow because rejected dropped faster (likelihood displacement, deck §3.4)? What does this tell you about whether DPO did what you wanted? Reference the curve shape — flat for the first ~100 steps, then trending one way? KL divergence to reference at end?_
+`DPOTrainer` gọi `xformers.memory_efficient_attention` với layout GQA 5 chiều (BMGHK: batch 2 do ghép chosen+rejected, 2 nhóm KV, 8 head query, head_dim 128). Trên T4 — Turing, compute capability 7.5 — kernel backward duy nhất khả dụng là `cutlassB`, và nó không hỗ trợ BMGHK; hai kernel có hỗ trợ (`fa2B`, `fa3B`) yêu cầu capability ≥ 8.0, tức Ampere trở lên:
 
-_Answer here. ≥ 100 words._
+```
+NotImplementedError: No operator found for `memory_efficient_attention_backward`
+query: shape=(2, 269, 2, 8, 128) (torch.float16)
+  fa3B@0.0.0:  requires device with capability >= (8, 0) but your GPU has capability (7, 5)
+               operator does not support BMGHK format
+  fa2B@2.5.7:  requires device with capability >= (8, 0) but your GPU has capability (7, 5)
+               operator does not support BMGHK format
+  cutlassB-pt: operator does not support BMGHK format
+```
 
----
+Đây là giới hạn phần cứng chứ không phải lỗi cấu hình. SFT ở NB1 thoát được vì Unsloth bật padding-free với batch 1; DPO buộc phải giữ đồng thời chosen và rejected trong cùng một batch nên rơi đúng vào đường thiếu kernel.
 
-## 4. Qualitative comparison (≥ 8 examples)
+Tôi đã thử ba hướng khắc phục. **Một**, đặt `attn_implementation="eager"` khi load qua Unsloth — không tác dụng, vì Unsloth patch attention ở tầng module và bỏ qua tham số config. **Hai**, bỏ Unsloth, load bằng `AutoModelForCausalLM` với `attn_implementation="sdpa"` — vượt được lỗi xformers, nhưng lộ ra rằng TRL 0.19 phụ thuộc `MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES`, một API đã bị transformers 5.5 gỡ bỏ, và Unsloth vốn âm thầm vá hộ. **Ba**, tự shim tên đó rồi lần lượt xử lý chuỗi phụ thuộc `mergekit` → `immutables`, cuối cùng bế tắc ở mergekit 0.1.4 pin `pydantic~=2.10.6` trong khi môi trường có pydantic 2.13.4 nên không dựng nổi schema cho `torch.Tensor`.
 
-> **Paste `04_side_by_side_table.png` here** (or summarize in markdown).
-
-| # | Prompt category | Prompt (truncated) | SFT-only | SFT+DPO | Winner |
-|---|---|---|---|---|---|
-| 1 | helpfulness | _<...>_ | _<...>_ | _<...>_ | _<SFT \| DPO \| tie>_ |
-| 2 | helpfulness | | | | |
-| 3 | helpfulness | | | | |
-| 4 | helpfulness | | | | |
-| 5 | safety | | | | |
-| 6 | safety | | | | |
-| 7 | safety | | | | |
-| 8 | safety | | | | |
-
-**Win/loss/tie summary:** _<e.g., SFT+DPO wins 5/8, ties 2/8, loses 1/8>_
-
-**Judge used:** _<gpt-4o-mini | claude-haiku-4-5 | manual rubric>_
+Điều rút ra: ma trận tương thích Unsloth × TRL × transformers × kiến trúc GPU là rủi ro thực của công việc alignment, không phải chi tiết vặt. Unsloth không chỉ tăng tốc — nó còn giữ cho TRL chạy được trên transformers 5.x. Chỉ khi gỡ nó ra tôi mới thấy TRL thực sự phụ thuộc những gì. Nếu làm lại, tôi sẽ kiểm tra compute capability và pin cứng phiên bản transformers **trước** khi tiêu thời gian GPU cho SFT.
 
 ---
 
-## 5. β trade-off
+## 4. Qualitative comparison
 
-_If you ran the β-sweep bonus (rigor add-on +6), describe the result:_
+Không thực hiện được: NB4 cần `adapters/dpo/` mà NB3 không tạo ra (xem §3). Bộ 8 prompt đánh giá (4 helpfulness + 4 safety) đã được sinh và lưu ở `data/eval/prompts.json`.
 
-| β | Reward gap | Win-rate (8 prompts) | Output length | Notes |
-|---:|---:|---:|---:|---|
-| 0.05 | _<...>_ | _<...>_ | _<...>_ | |
-| 0.1 (default) | _<...>_ | _<...>_ | _<...>_ | |
-| 0.5 | _<...>_ | _<...>_ | _<...>_ | |
-
-_Interpret: where's the sweet spot for your data? Why? Does it match the deck's §3.3 prediction?_
-
-_If you did **not** run the sweep:_ predict what you'd expect to see and write a 3-sentence hypothesis. (No points lost — but the muscle of forming a hypothesis is the value.)
-
-_Answer here._
+Một lỗi khác đã phát hiện và sửa trong lúc chạy: `unsloth/Qwen2.5-3B-bnb-4bit` là **base model**, không phải Instruct, nên tokenizer của nó không kèm `chat_template`. Mọi lời gọi `apply_chat_template` trong NB1/NB2/NB4 đều hỏng. Vocab đã có sẵn `<|im_start|>` (151644) và `<|im_end|>` (151645), nên tôi gắn template ChatML thủ công và đặt `eos_token = "<|im_end|>"` — nếu để nguyên `<|endoftext|>` thì `model.generate` không dừng đúng chỗ và output sẽ tràn qua cả lượt của user.
 
 ---
 
-## 6. Personal reflection — single change that mattered most (≥ 150 words)
+## 5. β trade-off — giả thuyết
 
-> Pick **one** decision you made during this lab — choosing β, choosing the data slice, choosing the judge model, choosing T4 vs BigGPU — and walk through:
->
-> 1. What was the alternative you considered?
-> 2. Why did you pick the one you did?
-> 3. Did the result confirm or surprise you?
-> 4. If you redid the lab tomorrow, what would you change?
-
-_Answer here. ≥ 150 words._
+Không chạy được β-sweep. Dự đoán: β nhỏ (0.05) nới ràng buộc KL nên policy đi xa reference hơn, reward gap lớn nhất nhưng dễ lệch phân phối và output ngắn lại; β lớn (0.5) giữ policy sát reference, gap nhỏ và thay đổi ít; β = 0.1 là điểm cân bằng, khớp với lựa chọn mặc định của deck §3.3.
 
 ---
 
-## 7. Benchmark interpretation (≥ 150 words)
+## 6. Quyết định quan trọng nhất
 
-> **Paste `07-benchmark-comparison.png` here** (or link).
+Quyết định đáng kể nhất không phải chọn β mà là **lọc dữ liệu preference trước khi train**. NB2 in ra cảnh báo rằng chỉ 44,2% số cặp lọt trong `MAX_LEN=512`. Ban đầu tôi định bỏ qua vì trainer vẫn chạy được — nó tự cắt phần thừa. Nhưng khi nhìn kỹ phân bố độ dài, `chosen` có median 400 token còn `rejected` chỉ 278. Nghĩa là việc cắt **không đối xứng**: câu trả lời tốt bị cắt cụt thường xuyên hơn câu trả lời kém. DPO khi đó học rằng đoạn văn bị cụt giữa chừng là đáng thưởng — đúng cơ chế sinh ra hiện tượng `chosen_reward` tụt mà deck §3.4 gọi là likelihood displacement. Tôi đã suýt ghi nhận nó như một "phát hiện thú vị về failure mode" trong khi thực chất đó là lỗi dữ liệu do chính mình gây ra.
 
-Score table from `data/eval/benchmark_results.json`:
+Phương án thay thế là nâng `MAX_LEN` lên 1024, nhưng T4 16 GB không đủ VRAM cho DPO ở độ dài đó, vì mỗi step phải giữ cả chosen lẫn rejected qua hai lượt forward. Tôi chọn lọc, giữ 877/2000 cặp nguyên vẹn — mất 56% dữ liệu, đổi lấy phần còn lại sạch. Với DPO tôi tin đánh đổi này đúng: preference learning học từ *sự tương phản* giữa hai câu trả lời, nên một cặp bị méo còn hại hơn là thiếu một cặp.
 
-| Benchmark | SFT-only | SFT+DPO | Δ |
-|---|---:|---:|---:|
-| IFEval | _<...>_ | _<...>_ | _<...>_ |
-| GSM8K | _<...>_ | _<...>_ | _<...>_ |
-| MMLU (sampled) | _<...>_ | _<...>_ | _<...>_ |
-| AlpacaEval-lite | _<...>_ | _<...>_ | _<...>_ |
+Quyết định thứ hai là nâng `learning_rate` từ 5e-7 lên 5e-6. Con số 5e-7 trong deck là dành cho full fine-tuning; tôi đang train LoRA, vốn cần lr cao hơn khoảng một bậc — chính NB1 dùng 2e-4 cho SFT. Với chỉ khoảng 110 optimizer step, 5e-7 gần như chắc chắn cho reward gap phẳng, và tôi sẽ mất phần lớn giá trị chẩn đoán của biểu đồ.
 
-_Interpret the deltas. Which benchmark went up most? Did GSM8K or MATH regress (alignment tax — see deck §8.1)? Did MMLU stay flat (factual knowledge preserved) or drop (catastrophic forgetting)? Was AlpacaEval-lite win-rate consistent with NB4 judge results, or divergent? Which benchmark surprised you, and what does it tell you about whether DPO did the alignment work you wanted?_
+Nếu làm lại lab này ngày mai: kiểm tra tương thích GPU **trước tiên**, và chọn tier phần cứng theo yêu cầu của bước *nặng nhất* trong pipeline (DPO) chứ không theo bước đầu tiên (SFT). Bài học đắt nhất hôm nay là SFT chạy trơn tru đã cho tôi một cảm giác an toàn sai lệch.
 
-_Answer here. ≥ 150 words._
+---
+
+## 7. Benchmark
+
+Không thực hiện (NB6 là bonus, và phụ thuộc `adapters/dpo/`).
 
 ---
 
@@ -125,11 +101,10 @@ _Answer here. ≥ 150 words._
 - [ ] Đã release GGUF với multiple quantizations (+3)
 - [ ] Đã link W&B run public (+2)
 - [ ] Đã làm cross-judge comparison (+4)
-- [ ] Đã làm `BONUS-CHALLENGE.md` provocation (ungraded — link `bonus/` folder)
-- [ ] Pair work với: _<tên đồng đội nếu có>_
+- [ ] Đã làm `BONUS-CHALLENGE.md` provocation (ungraded)
 
 ---
 
 ## Điều ngạc nhiên nhất khi làm lab này
 
-_(Optional, 1–3 câu)_
+Phần khó nhất không phải thuật toán DPO mà là ma trận tương thích thư viện. Unsloth âm thầm vá nhiều chỗ transformers 5.x đã gỡ bỏ, nên chỉ khi gỡ Unsloth ra tôi mới thấy TRL thực sự phụ thuộc những gì — và mới hiểu rằng "tăng tốc" chỉ là một nửa việc nó làm.
