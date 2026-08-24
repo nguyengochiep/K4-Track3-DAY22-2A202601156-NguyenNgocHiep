@@ -1,7 +1,7 @@
 # Reflection — Lab 22 (DPO/ORPO Alignment)
 
 **Tên:** Nguyễn Ngọc Hiệp
-**Cohort:** A20-K4
+**Cohort:** 4
 **Tier đã chạy:** T4
 **Date:** 2026-08-24
 
