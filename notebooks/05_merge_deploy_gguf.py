@@ -68,15 +68,17 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
-# Stack SFT-mini → DPO adapters
-SFT_PATH = REPO_ROOT / "adapters" / "sft-mini"
-model = PeftModel.from_pretrained(model, str(SFT_PATH))
-print(f"Loaded SFT-mini adapter from {SFT_PATH}")
+# NB3 continues training the SFT adapter with DPO, so adapters/dpo/ IS the aligned
+# end state — that is what we merge. Merging adapters/sft-mini/ here (as this cell
+# used to) would silently ship a GGUF with none of the DPO alignment in it.
+model = PeftModel.from_pretrained(model, str(DPO_PATH))
+print(f"Loaded DPO adapter from {DPO_PATH}")
 
 # %% [markdown]
-# > **Note:** The DPO adapter trained in NB3 stacks on top of SFT. To get a fully
-# > aligned merged model, we apply both adapters before merging. Unsloth's
-# > `save_pretrained_merged` handles the SFT + DPO + base merge in one shot.
+# > **Note:** Check the "Adapters present" line printed by NB3 § 1. If it lists a
+# > single adapter, `adapters/dpo/` already contains SFT+DPO and merging it alone is
+# > correct. If NB3 reported *two* adapters, load `adapters/sft-mini/` first and then
+# > `model.load_adapter(DPO_PATH, ...)` before merging.
 
 # %% [markdown]
 # ## 2. Save merged FP16 weights
@@ -86,7 +88,7 @@ print(f"Loaded SFT-mini adapter from {SFT_PATH}")
 # converter in step 3.
 
 # %%
-# This re-loads the model with both SFT and DPO adapters merged into base weights.
+# Merges the DPO adapter into the base weights.
 # Output is FP16 (or BF16 on Ampere+) HF-format weights ready for inference.
 model.save_pretrained_merged(
     str(MERGED_PATH),

@@ -54,8 +54,10 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = PeftModel.from_pretrained(model, args.sft_path)
-    print("Loaded SFT-mini adapter")
+    # adapters/dpo/ is the aligned end state (NB3 continues training the SFT adapter
+    # with DPO). Merging --sft-path here would ship a GGUF with no DPO in it.
+    model = PeftModel.from_pretrained(model, args.dpo_path)
+    print(f"Loaded DPO adapter from {args.dpo_path}")
 
     # Step 2: save merged FP16
     model.save_pretrained_merged(

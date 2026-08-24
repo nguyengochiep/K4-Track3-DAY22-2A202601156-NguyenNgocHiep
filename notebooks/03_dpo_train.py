@@ -113,6 +113,14 @@ model = FastLanguageModel.get_peft_model(
 )
 print(f"Trainable params (DPO LoRA): {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
+# Diagnostic — read this before NB4. Recent Unsloth SKIPS the call above when the
+# model already carries LoRA ("Already have LoRA adapters! We shall skip this step"),
+# in which case DPO keeps training the SFT adapter itself and adapters/dpo/ is a
+# self-contained SFT+DPO adapter. If instead a second adapter appears here, NB4 and
+# NB5 need to load both. Either way, the printout below is the ground truth.
+print("Adapters present:", list(getattr(model, "peft_config", {}).keys()))
+print("Active adapter:  ", getattr(model, "active_adapter", "n/a"))
+
 # %% [markdown]
 # > **Why no separate `ref_model=` argument?** Modern TRL (≥ 0.12) auto-detects
 # > PEFT models and uses the *base model without the adapter* as the reference.
@@ -237,11 +245,16 @@ plt.show()
 # Read this cell carefully — it tells you which kind of "reward gap up" you got.
 
 # %%
-if chosen_col and rejected_col and len(logs) >= 5:
-    last_chosen = logs[chosen_col].iloc[-5:].mean()
-    last_rejected = logs[rejected_col].iloc[-5:].mean()
+# Defined up-front: the metrics cell (§ 6) reads these, so they must exist even
+# when the run was too short to log rewards.
+last_chosen = last_rejected = last_gap = None
+
+if chosen_col and rejected_col and len(logs) >= 1:
+    tail = min(5, len(logs))
+    last_chosen = logs[chosen_col].iloc[-tail:].mean()
+    last_rejected = logs[rejected_col].iloc[-tail:].mean()
     last_gap = last_chosen - last_rejected
-    first_chosen = logs[chosen_col].iloc[:5].mean()
+    first_chosen = logs[chosen_col].iloc[:tail].mean()
 
     chosen_delta = last_chosen - first_chosen
 
@@ -263,6 +276,10 @@ if chosen_col and rejected_col and len(logs) >= 5:
         print("✓ INTENDED: chosen reward UP and gap positive. Classic DPO success.")
     else:
         print("?  AMBIGUOUS: weak chosen movement + positive gap. Try longer training or higher lr.")
+else:
+    print("⚠  No reward columns in the training logs (or no logged steps yet).")
+    print("   Reward metrics stay None; § 6 will still save the adapter.")
+    print("   Check the TRL version and that training ran past logging_steps=10.")
 
 # %% [markdown]
 # ## 6. Save adapter
@@ -282,9 +299,9 @@ metrics = {
     "lr": LR,
     "epochs": EPOCHS,
     "final_train_loss": float(train_result.training_loss),
-    "end_chosen_reward": float(last_chosen) if chosen_col else None,
-    "end_rejected_reward": float(last_rejected) if rejected_col else None,
-    "end_reward_gap": float(last_gap) if chosen_col and rejected_col else None,
+    "end_chosen_reward": float(last_chosen) if last_chosen is not None else None,
+    "end_rejected_reward": float(last_rejected) if last_rejected is not None else None,
+    "end_reward_gap": float(last_gap) if last_gap is not None else None,
 }
 (DPO_OUT / "dpo_metrics.json").write_text(json.dumps(metrics, indent=2))
 print(f"Wrote metrics to {DPO_OUT / 'dpo_metrics.json'}")
